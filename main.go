@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/rs/xid"
 	"github.com/streadway/amqp"
 )
 
@@ -117,7 +118,7 @@ func NewConsumer(cfg *AmqpConfig, exchange, exchangeType, queueName, key, ctag s
 	}
 
 	go func() {
-		fmt.Printf("closing: %s", <-c.conn.NotifyClose(make(chan *amqp.Error)))
+		log.Printf("closing: %s", <-c.conn.NotifyClose(make(chan *amqp.Error)))
 	}()
 
 	log.Printf("got Connection, getting Channel")
@@ -179,19 +180,15 @@ func NewConsumer(cfg *AmqpConfig, exchange, exchangeType, queueName, key, ctag s
 		return nil, fmt.Errorf("Queue Consume: %s", err)
 	}
 
-	go handle(deliveries, c.done, c.channel)
+	go handle(deliveries, c.done, c.channel, c)
 
 	return c, nil
 }
 
 func (c *Consumer) Shutdown() error {
 	// will close() the deliveries channel
-	if err := c.channel.Cancel(c.tag, true); err != nil {
+	if err := c.channel.Cancel(c.tag, false); err != nil {
 		return fmt.Errorf("Consumer cancel failed: %s", err)
-	}
-
-	if err := c.conn.Close(); err != nil {
-		return fmt.Errorf("AMQP connection close error: %s", err)
 	}
 
 	defer log.Printf("AMQP shutdown OK")
@@ -200,10 +197,12 @@ func (c *Consumer) Shutdown() error {
 	return <-c.done
 }
 
-func handle(deliveries <-chan amqp.Delivery, done chan error, ch *amqp.Channel) {
+func handle(deliveries <-chan amqp.Delivery, done chan error, ch *amqp.Channel, c *Consumer) {
 	for d := range deliveries {
+		id := xid.New()
 		log.Printf(
-			"got %dB delivery: [%v] %s",
+			"[%s] got %dB delivery: [%v] %s",
+			id.String(),
 			len(d.Body),
 			d.DeliveryTag,
 			d.Body,
@@ -211,7 +210,7 @@ func handle(deliveries <-chan amqp.Delivery, done chan error, ch *amqp.Channel) 
 		cmd := exec.Command(*executable)
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
-			log.Printf("Got err: %v", err)
+			log.Printf("[%s] Got err: %v", id.String(), err)
 		}
 		go func() {
 			defer stdin.Close()
@@ -220,10 +219,12 @@ func handle(deliveries <-chan amqp.Delivery, done chan error, ch *amqp.Channel) 
 
 		output, err := cmd.Output()
 		if err != nil {
-			log.Printf("Got err: %v", err)
+			log.Printf("[%s] Got err: %v", id.String(), err)
+			output = []byte(fmt.Sprintf("%v", err))
 		}
 		log.Printf(
-			"Delivering response to %s: %s",
+			"[%s] Delivering response to %s: %s",
+			id.String(),
 			d.ReplyTo,
 			output,
 		)
@@ -238,9 +239,24 @@ func handle(deliveries <-chan amqp.Delivery, done chan error, ch *amqp.Channel) 
 				CorrelationId: d.CorrelationId,
 				Body:          output,
 			})
-		// failOnError(err, "Failed to publish a message")
-		d.Ack(false)
+		if err != nil {
+			log.Printf(
+				"[%s] Could not publish response to %s: %s",
+				id.String(),
+				d.ReplyTo,
+				err,
+			)
+		}
+
+		err = d.Ack(false)
+		if err != nil {
+			log.Printf("[%s] Could not ack delivery: %s", id.String(), err)
+		}
+
 	}
 	log.Printf("handle: deliveries channel closed")
+	if err := c.conn.Close(); err != nil {
+		log.Printf("AMQP connection close error: %s", err)
+	}
 	done <- nil
 }
