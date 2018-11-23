@@ -24,6 +24,7 @@ var (
 	config       = flag.String("config", "/etc/hapi/config.json", "API config file")
 	executable   = flag.String("exec", "hapi.php", "Path to API executable")
 	durable      = flag.Bool("durable", true, "Durable queue")
+	prefetch     = flag.Int("prefetch", 1, "Prefetch count")
 )
 
 func init() {
@@ -125,6 +126,10 @@ func NewConsumer(cfg *AmqpConfig, exchange, exchangeType, queueName, key, ctag s
 	c.channel, err = c.conn.Channel()
 	if err != nil {
 		return nil, fmt.Errorf("Channel: %s", err)
+	}
+
+	if err = c.channel.Qos(*prefetch, 0, false); err != nil {
+		return nil, fmt.Errorf("Qos: %s", err)
 	}
 
 	log.Printf("got Channel, declaring Exchange (%q)", exchange)
